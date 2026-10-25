@@ -18,16 +18,16 @@ class Principal:
 
 @dataclass
 class Finding:
-    id: str                     # e.g. "F001"[cite: 1]
-    rule: str                   # "wildcard_action" | "wildcard_resource" | "open_trust" | "excess_permission"[cite: 1]
-    scanner_severity: str       # "HIGH" | "MEDIUM" | "LOW"[cite: 1]
-    location: str               # node name (user/role) the finding sits on[cite: 1]
-    statement_ref: Optional[int] = None   # statement index[cite: 1]
-    detail: str = ""[cite: 1]
+    id: str                     # e.g. "F001"
+    rule: str                   # "wildcard_action" | "wildcard_resource" | "open_trust" | "excess_permission"
+    scanner_severity: str       # "HIGH" | "MEDIUM" | "LOW"
+    location: str               # node name (user/role) the finding sits on
+    statement_ref: Optional[int] = None   # statement index
+    detail: str = ""
 
 @dataclass
 class ScoredFinding:
     finding: Finding
-    reachable: Dict[str, int]   # {resource_name: distance}[cite: 1]
+    reachable: Dict[str, int]   # {resource_name: distance}
     score: float
-    exposed: bool               # can an entry point reach this node?[cite: 1]
+    exposed: bool               # can an entry point reach this node?
