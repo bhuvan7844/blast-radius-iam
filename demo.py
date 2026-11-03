@@ -2,12 +2,11 @@ import os
 import sys
 import pathlib
 
-# Ensure 'src' is always on sys.path for direct script execution
+# Ensure 'src' is always on sys.path for direct execution
 _SRC_DIR = pathlib.Path(__file__).resolve().parent / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-import json
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -16,16 +15,22 @@ import networkx as nx
 from blastradius.models import Principal, Statement
 from blastradius.graph_builder import build_graph, load_sensitivity_config
 from blastradius.detector import detect_misconfigurations
-from blastradius.attach import attach_findings, get_exposure_path
-from blastradius.parser_terraform import parse_terraform_file
+from blastradius.attach import attach_findings
+from blastradius.scoring import score_all_findings, load_scoring_config
+from blastradius.ranking import rank_by_blast_radius, generate_ranking_comparison
+from blastradius.fixes import greedy_best_k_fixes, total_environment_risk
 
 console = Console()
 
 
-def run_live_demo():
-    console.print(Panel.fit("[bold cyan]Blast-Radius IAM - Live Pipeline Demonstration[/bold cyan]\nPhases 1 to 5: Parsing -> Graph Construction -> Rule Detection -> Exposure Attachment"))
+def run_full_pipeline_demo():
+    console.print(Panel.fit(
+        "[bold cyan]Blast-Radius IAM - End-to-End Pipeline Demonstration[/bold cyan]\n"
+        "Phases 1-7: Parsing -> Graph -> Detection -> Exposure -> Scoring -> Ranking -> Greedy Fixes",
+        border_style="cyan"
+    ))
 
-    # 1. Setup Worked Example Principals
+    # --- 1. Setup Environment (Worked Example from Paper) ---
     alice = Principal(
         name="alice",
         kind="user",
@@ -82,7 +87,7 @@ def run_live_demo():
                 source="SuperAdminPolicy",
             )
         ],
-        trust=[],  # No one can assume this role
+        trust=[],  # Isolated: no incoming paths
     )
 
     resources = [
@@ -92,92 +97,105 @@ def run_live_demo():
 
     principals = [alice, dev_role, admin_role, isolated_admin]
 
-    # --- Section A: Display Parsed Principals & Policies ---
-    console.print("\n[bold yellow]1. Parsed Principals & Statements:[/bold yellow]")
-    princ_table = Table(title="IAM Principals in Environment", show_header=True, header_style="bold magenta")
-    princ_table.add_column("Principal Name", style="cyan")
-    princ_table.add_column("Kind", style="white")
-    princ_table.add_column("Trust Policy", style="yellow")
-    princ_table.add_column("Allowed Actions", style="green")
+    # --- 2. Construct Graph (Phase 4) ---
+    console.print("\n[bold yellow]Step 1: Constructing Directed Reachability Graph (Phase 4)[/bold yellow]")
+    sens_cfg = load_sensitivity_config()
+    G = build_graph(principals, resources, sens_cfg)
 
-    for p in principals:
-        acts = []
-        for s in p.statements:
-            acts.append(f"{', '.join(s.actions)} on {', '.join(s.resources)}")
-        princ_table.add_row(
-            p.name,
-            p.kind,
-            ", ".join(p.trust) if p.trust else "[dim](none)[/dim]",
-            "\n".join(acts) if acts else "[dim](none)[/dim]",
-        )
-    console.print(princ_table)
-
-    # --- Section B: Build Reachability Graph ---
-    console.print("\n[bold yellow]2. Constructing Directed Reachability Graph...[/bold yellow]")
-    cfg = load_sensitivity_config()
-    G = build_graph(principals, resources, cfg)
-
-    graph_table = Table(title="Graph Nodes & Inferred Sensitivities", show_header=True, header_style="bold blue")
-    graph_table.add_column("Node Name", style="cyan")
-    graph_table.add_column("Node Kind", style="white")
-    graph_table.add_column("Sensitivity (1-10)", justify="center", style="bold red")
-
-    for node, data in G.nodes(data=True):
-        sens = data.get("sensitivity", "-")
-        graph_table.add_row(node, data.get("kind", "unknown"), str(sens))
-    console.print(graph_table)
-
-    # Show Edges
-    edge_table = Table(title="Graph Relationships / Edges", show_header=True, header_style="bold green")
-    edge_table.add_column("Source", style="cyan")
-    edge_table.add_column("Relationship", style="bold yellow")
-    edge_table.add_column("Target", style="cyan")
-    edge_table.add_column("Details / Reason", style="dim white")
-
-    for u, v, data in G.edges(data=True):
-        edge_table.add_row(u, f"--[{data.get('etype')}]-->", v, data.get("reason", ""))
-    console.print(edge_table)
-
-    # Attack Paths from Alice
-    console.print("\n[bold yellow]3. Attack Path Analysis from Entry Point ('alice'):[/bold yellow]")
+    # Attack Path Detection
     if nx.has_path(G, "alice", "prod-customer-db"):
         path = nx.shortest_path(G, "alice", "prod-customer-db")
         path_str = " -> ".join([f"[bold red]{n}[/bold red]" if n == "prod-customer-db" else f"[bold cyan]{n}[/bold cyan]" for n in path])
-        console.print(Panel(f"[bold green]CRITICAL PATH FOUND:[/bold green] {path_str}\n"
-                            f"Explanation: alice assumes open dev-role -> escalates to admin-role via PassRole+CreateFunction -> reaches crown jewel prod-customer-db!", title="Escalation Chain"))
+        console.print(Panel(
+            f"[bold green]CRITICAL ATTACK PATH DETECTED:[/bold green] {path_str}\n"
+            f"Details: Entry point 'alice' can assume 'dev-role' -> escalates to 'admin-role' -> accesses 'prod-customer-db'!",
+            title="Graph Reachability Analysis",
+            border_style="green"
+        ))
 
-    # --- Section C: Run Misconfiguration Detector ---
-    console.print("\n[bold yellow]4. Running Misconfiguration Detector (including Excess Permissions):[/bold yellow]")
-    findings = detect_misconfigurations(principals)
+    # --- 3. Detect & Attach Findings (Phase 5) ---
+    console.print("\n[bold yellow]Step 2: Detecting Misconfigurations & Attaching Exposure (Phase 5)[/bold yellow]")
+    raw_findings = detect_misconfigurations(principals)
+    attached_findings = attach_findings(G, raw_findings)
 
-    # --- Section D: Attach Findings & Compute Exposure ---
-    attached_findings = attach_findings(G, findings)
+    # --- 4. Blast-Radius Scoring & Ranking (Phase 6) ---
+    console.print("\n[bold yellow]Step 3: Blast-Radius Scoring & Priority Ranking (Phase 6)[/bold yellow]")
+    scoring_cfg = load_scoring_config()
+    scored_findings = score_all_findings(G, attached_findings, scoring_cfg)
+    ranking_data = generate_ranking_comparison(scored_findings)
 
-    findings_table = Table(title="Detected Findings with Exposure Status", show_header=True, header_style="bold red")
-    findings_table.add_column("ID", style="dim")
-    findings_table.add_column("Rule", style="bold yellow")
-    findings_table.add_column("Scanner Sev", style="magenta")
-    findings_table.add_column("Location", style="cyan")
-    findings_table.add_column("Exposed?", justify="center", style="bold")
-    findings_table.add_column("Detail", style="white")
+    rank_table = Table(title="Prioritization: Traditional Scanner vs. Blast-Radius", show_header=True, header_style="bold magenta")
+    rank_table.add_column("BR Rank", justify="center", style="bold cyan")
+    rank_table.add_column("Scanner Rank", justify="center", style="dim")
+    rank_table.add_column("Rank Shift", justify="center", style="bold")
+    rank_table.add_column("Finding ID", style="dim")
+    rank_table.add_column("Rule", style="yellow")
+    rank_table.add_column("Location", style="cyan")
+    rank_table.add_column("Scanner Sev", style="white")
+    rank_table.add_column("BR Score", justify="right", style="bold red")
+    rank_table.add_column("Exposed?", justify="center")
 
-    for f in attached_findings:
-        exp_badge = "[bold green]YES[/bold green]" if f.exposed else "[bold red]NO (Isolated)[/bold red]"
-        findings_table.add_row(
-            f.id,
-            f.rule,
-            f.scanner_severity,
-            f.location,
-            exp_badge,
-            f.detail,
+    for row in ranking_data:
+        delta = row["rank_delta"]
+        if delta > 0:
+            shift = f"[green]+{delta} (Promoted)[/green]"
+        elif delta < 0:
+            shift = f"[red]{delta} (Demoted)[/red]"
+        else:
+            shift = "[dim]0[/dim]"
+
+        exp_str = "[bold green]YES[/bold green]" if row["exposed"] else "[bold red]NO (Isolated)[/bold red]"
+
+        rank_table.add_row(
+            str(row["br_rank"]),
+            str(row["base_rank"]),
+            shift,
+            row["id"],
+            row["rule"],
+            row["location"],
+            row["scanner_severity"],
+            f"{row['br_score']:.2f}",
+            exp_str,
         )
-    console.print(findings_table)
+    console.print(rank_table)
 
-    console.print(Panel("[bold green]Key Takeaway for Blast-Radius Prioritization:[/bold green]\n"
-                        "- Standard scanners label isolated-admin's Action: * as [bold red]HIGH[/bold red], but it is [bold red]NOT exposed[/bold red] (0 incoming attack paths).\n"
-                        "- Standard scanners label dev-role's open trust policy as only [bold yellow]MEDIUM[/bold yellow], but it IS [bold green]EXPOSED[/bold green] and enables an escalation path to prod-customer-db!\n"
-                        "- Blast-radius scoring (Phase 6) flips this ranking so the real risk is fixed first.", title="Phase 5 Conclusion"))
+    # --- 5. Fix Simulation (Phase 7) ---
+    console.print("\n[bold yellow]Step 4: Fix Simulation & Greedy Top-K Remediations (Phase 7)[/bold yellow]")
+    init_risk = total_environment_risk(G, attached_findings, scoring_cfg)
+    console.print(f"Total Initial Environment Risk Score: [bold red]{init_risk:.2f}[/bold red]")
+
+    fix_results = greedy_best_k_fixes(G, attached_findings, k=2, cfg=scoring_cfg)
+
+    fix_table = Table(title="Recommended Fix Plan (Greedy Top-K)", show_header=True, header_style="bold green")
+    fix_table.add_column("Step", justify="center", style="bold")
+    fix_table.add_column("Action Type", style="cyan")
+    fix_table.add_column("Target Node", style="yellow")
+    fix_table.add_column("Remediation Detail", style="white")
+    fix_table.add_column("Risk Drop", justify="right", style="bold green")
+    fix_table.add_column("Risk Remaining", justify="right", style="bold red")
+
+    for step in fix_results["steps"]:
+        fix = step["fix"]
+        fix_table.add_row(
+            str(step["step"]),
+            fix.action_type,
+            fix.target_node,
+            fix.description,
+            f"-{step['risk_reduction']:.2f} ({step['percent_gain']}%)",
+            f"{step['risk_remaining']:.2f}",
+        )
+    console.print(fix_table)
+
+    console.print(Panel(
+        f"[bold green]Fix Simulation Summary:[/bold green]\n"
+        f"- Initial Risk: [bold red]{fix_results['initial_risk']:.2f}[/bold red]\n"
+        f"- Remaining Risk after {len(fix_results['chosen_fixes'])} fixes: [bold green]{fix_results['final_risk']:.2f}[/bold green]\n"
+        f"- Total Risk Reduction: [bold green]{fix_results['total_percent_reduction']}%[/bold green]\n"
+        f"- Verified: After Step 1 (tightening dev-role trust), attack path from 'alice' to 'prod-customer-db' is completely severed!",
+        title="Remediation Impact",
+        border_style="green"
+    ))
 
 
 if __name__ == "__main__":
-    run_live_demo()
+    run_full_pipeline_demo()
