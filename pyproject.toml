@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blast-radius-iam"
+version = "0.1.0"
+description = "Blast-radius aware static analysis for IAM misconfigurations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "networkx>=3.2",
+    "python-hcl2>=4.3",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "rich>=13.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+

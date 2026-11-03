@@ -24,6 +24,8 @@ class Finding:
     location: str               # node name (user/role) the finding sits on
     statement_ref: Optional[int] = None   # statement index
     detail: str = ""
+    node: Optional[str] = None
+    exposed: Optional[bool] = None
 
 @dataclass
 class ScoredFinding:
