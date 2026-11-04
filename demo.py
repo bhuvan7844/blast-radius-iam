@@ -24,6 +24,7 @@ console = Console()
 
 
 def run_full_pipeline_demo():
+    # Existing demo for worked example (phases 1-7)
     console.print(Panel.fit(
         "[bold cyan]Blast-Radius IAM - End-to-End Pipeline Demonstration[/bold cyan]\n"
         "Phases 1-7: Parsing -> Graph -> Detection -> Exposure -> Scoring -> Ranking -> Greedy Fixes",
@@ -143,9 +144,7 @@ def run_full_pipeline_demo():
             shift = f"[red]{delta} (Demoted)[/red]"
         else:
             shift = "[dim]0[/dim]"
-
         exp_str = "[bold green]YES[/bold green]" if row["exposed"] else "[bold red]NO (Isolated)[/bold red]"
-
         rank_table.add_row(
             str(row["br_rank"]),
             str(row["base_rank"]),
@@ -193,9 +192,51 @@ def run_full_pipeline_demo():
         f"- Total Risk Reduction: [bold green]{fix_results['total_percent_reduction']}%[/bold green]\n"
         f"- Verified: After Step 1 (tightening dev-role trust), attack path from 'alice' to 'prod-customer-db' is completely severed!",
         title="Remediation Impact",
-        border_style="green"
+        border_style="green",
     ))
 
+    # ---- Phase 8-9 Synthetic Benchmark Demonstration ----
+    console.print("\n[bold magenta]Phase 8-9: Synthetic Benchmark Demonstration[/bold magenta]")
+    import pathlib, os
+    from blastradius.parser_terraform import parse_terraform_file
+    synthetic_root = pathlib.Path(__file__).resolve().parent / "data" / "synthetic"
+    # iterate over case directories (skip terraform_example and any files directly in synthetic)
+    for case_dir in sorted([d for d in synthetic_root.iterdir() if d.is_dir() and d.name not in ["terraform_example"]]):
+        console.print(Panel.fit(f"[bold cyan]Benchmark: {case_dir.name}[/bold cyan]", border_style="cyan"))
+        tf_files = list(case_dir.rglob("*.tf"))
+        if not tf_files:
+            continue
+        # assume first .tf file defines the scenario
+        principals, resources = parse_terraform_file(str(tf_files[0]))
+        # reuse pipeline steps
+        sens_cfg = load_sensitivity_config()
+        Gb = build_graph(principals, resources, sens_cfg)
+        rawb = detect_misconfigurations(principals)
+        attachedb = attach_findings(Gb, rawb)
+        scoring_cfgb = load_scoring_config()
+        scoredb = score_all_findings(Gb, attachedb, scoring_cfgb)
+        rankingb = generate_ranking_comparison(scoredb)
+        # Show how many findings are marked as exposed (i.e., reachable by an attacker)
+        exposed_cnt = sum(1 for f in attachedb if getattr(f, "exposed", False))
+        console.print(f"[bold magenta]Exposed findings (Blast‑Radius): {exposed_cnt}[/bold magenta]")
+        # Simple summary: number of findings and highest score
+        highest_score = max(sf.score for sf in scoredb) if scoredb else 0.0
+        console.print(f"Findings: {len(attachedb)}  Highest BR score: {highest_score:.2f}")
+        # Show ranking table (top 3)
+        rank_tbl = Table(title="Top Findings", show_header=True, header_style="magenta")
+        rank_tbl.add_column("Rank", style="cyan")
+        rank_tbl.add_column("Finding ID")
+        rank_tbl.add_column("Rule")
+        rank_tbl.add_column("Score", justify="right")
+        for row in rankingb[:3]:
+            rank_tbl.add_row(str(row["br_rank"]), row["id"], row["rule"], f"{row['br_score']:.2f}")
+        console.print(rank_tbl)
+        # Run greedy fixes with budget 2 and show risk reduction
+        fixb = greedy_best_k_fixes(Gb, attachedb, k=2, cfg=scoring_cfgb)
+        console.print(f"Initial risk: {fixb['initial_risk']:.2f}, after fixes: {fixb['final_risk']:.2f}, reduction: {fixb['total_percent_reduction']}%")
+
+    console.print(Panel("[bold green]Demo Completed[/bold green]", border_style="green"))
+    return
 
 if __name__ == "__main__":
     run_full_pipeline_demo()
