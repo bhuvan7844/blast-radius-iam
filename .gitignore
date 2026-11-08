@@ -233,6 +233,11 @@ reports/*.dot
 # Local environment configuration overrides
 configs/local_*.yaml
 
+# Third-party benchmark datasets (cloned separately)
+data/cloudgoat/
+data/iam_vulnerable/
+data/terragoat/
+
 # macOS system files
 .DS_Store
 
