@@ -70,13 +70,36 @@ def _reachable_value(G: nx.DiGraph, node: str, cfg: "ScoringConfig") -> float:
     return total
 
 
+def _reachable_from_entries(G: nx.DiGraph, cfg: "ScoringConfig") -> float:
+    """
+    Total reachable value visible from all entry points (user/external nodes).
+    Used as the 'with' baseline for open_trust counterfactual.
+    """
+    entry_nodes = [n for n, d in G.nodes(data=True) if d.get("kind") in ("user", "external")]
+    seen: Dict[str, int] = {}
+    for entry in entry_nodes:
+        for n, d in nx.single_source_shortest_path_length(G, entry).items():
+            if n == entry:
+                continue
+            if G.nodes[n].get("kind") in ("resource", "role"):
+                if n not in seen or d < seen[n]:
+                    seen[n] = d
+    return sum(G.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in seen.items())
+
+
 def blast_radius(G: nx.DiGraph, finding: Finding, cfg: Optional["ScoringConfig"] = None) -> ScoredFinding:
     """
     Counterfactual blast-radius score for a finding:
-      score = exposure × (w_sensitivity × Δsens + w_count × Δlog_reach)
-    where Δ = value_with_finding_edges - value_without_finding_edges.
-    This scores the finding itself, not just the node, so two findings on the
-    same role get different scores if they enable different edges.
+      score = exposure x (w_sensitivity x delta_sens + w_count x delta_count)
+    where delta = value_with_finding_edges - value_without_finding_edges.
+
+    For open_trust (incoming can_assume edges): the counterfactual is measured
+    from the entry-point perspective — removing the trust edges cuts off the
+    attacker's path to everything downstream of this node.
+
+    For excess_permission / wildcard_* (outgoing edges): the counterfactual is
+    measured from the node itself — removing outgoing edges reduces what the
+    node can reach.
     """
     if cfg is None:
         cfg = ScoringConfig()
@@ -85,30 +108,44 @@ def blast_radius(G: nx.DiGraph, finding: Finding, cfg: Optional["ScoringConfig"]
     if v not in G:
         return ScoredFinding(finding=finding, reachable={}, score=0.0, exposed=False)
 
-    # Counterfactual: remove this finding's edges and measure the difference
     edges = _finding_edges(G, finding)
     H = G.copy()
     for u, w, _ in edges:
         H.remove_edge(u, w)
 
-    dist_with    = nx.single_source_shortest_path_length(G, v)
-    dist_without = nx.single_source_shortest_path_length(H, v)
-
-    reach_with = {
-        n: d for n, d in dist_with.items()
-        if n != v and G.nodes[n].get("kind") in ("resource", "role")
-    }
-    reach_without = {
-        n: d for n, d in dist_without.items()
-        if n != v and H.nodes[n].get("kind") in ("resource", "role")
-    }
-
-    sens_with    = sum(G.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_with.items())
-    sens_without = sum(H.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_without.items())
-    delta_sens  = max(0.0, sens_with - sens_without)
-    delta_count = max(0.0, math.log1p(len(reach_with)) - math.log1p(len(reach_without)))
-
     exp_score = exposure_score(G, v)
+
+    if finding.rule == "open_trust":
+        # Removing can_assume edges into v doesn't change what v can reach from itself.
+        # The correct counterfactual: how much total attacker-visible value is lost
+        # when the entry path to v is cut?
+        val_with    = _reachable_from_entries(G, cfg)
+        val_without = _reachable_from_entries(H, cfg)
+        delta_sens  = max(0.0, val_with - val_without)
+        # reach_with: what v itself can reach (for the reachable field)
+        dist_with = nx.single_source_shortest_path_length(G, v)
+        reach_with = {
+            n: d for n, d in dist_with.items()
+            if n != v and G.nodes[n].get("kind") in ("resource", "role")
+        }
+        delta_count = max(0.0, math.log1p(len(reach_with)))
+    else:
+        # For outgoing-edge findings: measure delta from the node itself
+        dist_with    = nx.single_source_shortest_path_length(G, v)
+        dist_without = nx.single_source_shortest_path_length(H, v)
+        reach_with = {
+            n: d for n, d in dist_with.items()
+            if n != v and G.nodes[n].get("kind") in ("resource", "role")
+        }
+        reach_without = {
+            n: d for n, d in dist_without.items()
+            if n != v and H.nodes[n].get("kind") in ("resource", "role")
+        }
+        sens_with    = sum(G.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_with.items())
+        sens_without = sum(H.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_without.items())
+        delta_sens  = max(0.0, sens_with - sens_without)
+        delta_count = max(0.0, math.log1p(len(reach_with)) - math.log1p(len(reach_without)))
+
     raw_score = exp_score * (cfg.w_sensitivity * delta_sens + cfg.w_count * delta_count)
 
     return ScoredFinding(
