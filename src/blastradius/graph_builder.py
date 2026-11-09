@@ -2,7 +2,7 @@ import os
 import re
 import yaml
 from fnmatch import fnmatch
-from typing import List, Dict, Any, Callable, Union, Optional
+from typing import List, Dict, Any, Callable, Union, Optional, Tuple
 import networkx as nx
 from blastradius.models import Principal, Statement
 from blastradius.escalation import add_escalation_edges
@@ -10,9 +10,16 @@ from blastradius.escalation import add_escalation_edges
 
 def load_sensitivity_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Loads sensitivity rules from a YAML file, or returns sensible defaults."""
-    if config_path and os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+    # Try explicit path first, then default configs/ location
+    candidates = [config_path] if config_path else []
+    candidates += ["configs/sensitivity.yaml"]
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+                if data:
+                    return data
 
     return {
         "rules": [
@@ -118,6 +125,62 @@ def principal_allowed_resource(principal: Principal, resource_name: str, resourc
     return allowed
 
 
+def _infer_role_sensitivity(role: Principal) -> int:
+    """
+    Derives a sensitivity score for a role from its own permissions.
+    Admin-equivalent roles score highest so reaching them counts in the formula.
+    """
+    for st in role.statements:
+        if st.effect != "Allow":
+            continue
+        actions_lower = [a.lower() for a in st.actions]
+        resources_lower = [r.lower() for r in st.resources]
+        # Full admin: Action:* Resource:*
+        if "*" in actions_lower and "*" in resources_lower:
+            return 10
+        # IAM full control
+        if any(a in ("iam:*", "*") for a in actions_lower):
+            return 9
+        # STS or broad escalation primitives
+        if any(a.startswith("iam:") for a in actions_lower):
+            return 7
+    return 4  # default role sensitivity (higher than resource default of 3)
+
+
+def parse_terraform_directory(directory: str) -> Tuple[List[Principal], List[Dict[str, Any]]]:
+    """
+    Parses all .tf files in a directory tree and merges principals/resources.
+    Principals with the same name are merged (statements combined).
+    """
+    from blastradius.parser_terraform import parse_terraform_file
+    import pathlib
+
+    merged_principals: Dict[str, Principal] = {}
+    merged_resources: List[Dict[str, Any]] = []
+    seen_resources: set = set()
+
+    for tf_path in sorted(pathlib.Path(directory).rglob("*.tf")):
+        try:
+            principals, resources = parse_terraform_file(str(tf_path))
+        except Exception:
+            continue
+        for p in principals:
+            if p.name in merged_principals:
+                merged_principals[p.name].statements.extend(p.statements)
+                merged_principals[p.name].trust.extend(
+                    t for t in p.trust if t not in merged_principals[p.name].trust
+                )
+            else:
+                merged_principals[p.name] = p
+        for r in resources:
+            key = (r.get("name"), r.get("type"))
+            if key not in seen_resources:
+                seen_resources.add(key)
+                merged_resources.append(r)
+
+    return list(merged_principals.values()), merged_resources
+
+
 def build_graph(
     principals: List[Principal],
     resources: Union[List[str], List[Dict[str, Any]]],
@@ -136,7 +199,8 @@ def build_graph(
 
     # 1. Add Principals
     for p in principals:
-        G.add_node(p.name, kind=p.kind, arn=p.arn, obj=p)
+        sens = _infer_role_sensitivity(p) if p.kind == "role" else 0
+        G.add_node(p.name, kind=p.kind, arn=p.arn, obj=p, sensitivity=sens)
 
     # 2. Add Target Resources
     normalized_resources: List[Dict[str, str]] = []
