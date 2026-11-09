@@ -1,11 +1,11 @@
 rules:
-  - { match: "*prod*db*",        score: 10 }[cite: 1]
-  - { match: "*rds*",            score: 9 }[cite: 1]
-  - { match: "*secretsmanager*", score: 9 }[cite: 1]
-  - { match: "*kms*",            score: 8 }[cite: 1]
-  - { match: "*prod*",           score: 8 }[cite: 1]
-  - { match: "*backup*",         score: 7 }[cite: 1]
-  - { match: "*iam*role/*admin*",score: 9 }[cite: 1]
-  - { match: "*dev*",            score: 2 }[cite: 1]
-  - { match: "*test*",           score: 1 }[cite: 1]
-default: 3[cite: 1]
+  - { match: "*prod*db*",        score: 10 }
+  - { match: "*rds*",            score: 9  }
+  - { match: "*secretsmanager*", score: 9  }
+  - { match: "*kms*",            score: 8  }
+  - { match: "*prod*",           score: 8  }
+  - { match: "*backup*",         score: 7  }
+  - { match: "*iam*role/*admin*", score: 9 }
+  - { match: "*dev*",            score: 2  }
+  - { match: "*test*",           score: 1  }
+default: 3

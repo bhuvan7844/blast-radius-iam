@@ -1,4 +1,4 @@
-gamma: 0.8               # path length decay factor[cite: 1]
-w_count: 1.0             # reachable resource count weight[cite: 1]
-w_sensitivity: 1.0       # resource sensitivity weight[cite: 1]
-exposed_epsilon: 0.05     # multiplier for unexposed nodes[cite: 1]
+gamma: 0.8            # path length decay factor
+w_count: 1.0          # reachable resource count weight
+w_sensitivity: 1.0    # resource sensitivity weight
+exposed_epsilon: 0.05 # multiplier for unexposed nodes
