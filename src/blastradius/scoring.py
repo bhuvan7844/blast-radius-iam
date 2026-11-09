@@ -2,10 +2,10 @@ import math
 import os
 import yaml
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 import networkx as nx
 from blastradius.models import Finding, ScoredFinding
-from blastradius.attach import is_exposed
+from blastradius.attach import exposure_score
 
 
 @dataclass
@@ -36,10 +36,47 @@ def load_scoring_config(config_path: Optional[str] = None) -> ScoringConfig:
     return ScoringConfig()
 
 
-def blast_radius(G: nx.DiGraph, finding: Finding, cfg: Optional[ScoringConfig] = None) -> ScoredFinding:
+def _finding_edges(G: nx.DiGraph, finding: Finding) -> List[Tuple[str, str, dict]]:
     """
-    Computes the blast radius score for a single finding:
-    Score = exposure * (w_sensitivity * sum(s(r) * gamma^(d-1)) + w_count * log(1 + |reach|))
+    Returns the graph edges that this specific finding enables.
+    - open_trust      -> incoming can_assume edges to the node
+    - excess_permission -> outgoing can_escalate edges from the node
+    - wildcard_*      -> outgoing can_access edges from the node
+    """
+    loc = finding.location
+    if loc not in G:
+        return []
+    if finding.rule == "open_trust":
+        return [(u, v, d) for u, v, d in G.in_edges(loc, data=True) if d.get("etype") == "can_assume"]
+    if finding.rule == "excess_permission":
+        return [(u, v, d) for u, v, d in G.out_edges(loc, data=True) if d.get("etype") == "can_escalate"]
+    # wildcard_action / wildcard_resource
+    return [(u, v, d) for u, v, d in G.out_edges(loc, data=True) if d.get("etype") == "can_access"]
+
+
+def _reachable_value(G: nx.DiGraph, node: str, cfg: "ScoringConfig") -> float:
+    """Sum of sensitivity × decay for all reachable role/resource nodes from `node`."""
+    if node not in G:
+        return 0.0
+    dist = nx.single_source_shortest_path_length(G, node)
+    total = 0.0
+    for n, d in dist.items():
+        if n == node:
+            continue
+        kind = G.nodes[n].get("kind")
+        if kind in ("resource", "role"):
+            sens = G.nodes[n].get("sensitivity", 3)
+            total += sens * (cfg.gamma ** (d - 1))
+    return total
+
+
+def blast_radius(G: nx.DiGraph, finding: Finding, cfg: Optional["ScoringConfig"] = None) -> ScoredFinding:
+    """
+    Counterfactual blast-radius score for a finding:
+      score = exposure × (w_sensitivity × Δsens + w_count × Δlog_reach)
+    where Δ = value_with_finding_edges - value_without_finding_edges.
+    This scores the finding itself, not just the node, so two findings on the
+    same role get different scores if they enable different edges.
     """
     if cfg is None:
         cfg = ScoringConfig()
@@ -48,36 +85,37 @@ def blast_radius(G: nx.DiGraph, finding: Finding, cfg: Optional[ScoringConfig] =
     if v not in G:
         return ScoredFinding(finding=finding, reachable={}, score=0.0, exposed=False)
 
-    # Shortest paths to all nodes reachable from finding's location
-    dist = nx.single_source_shortest_path_length(G, v)
+    # Counterfactual: remove this finding's edges and measure the difference
+    edges = _finding_edges(G, finding)
+    H = G.copy()
+    for u, w, _ in edges:
+        H.remove_edge(u, w)
 
-    # All reachable resources and intermediate roles (excluding self)
-    reach = {
-        n: d for n, d in dist.items()
+    dist_with    = nx.single_source_shortest_path_length(G, v)
+    dist_without = nx.single_source_shortest_path_length(H, v)
+
+    reach_with = {
+        n: d for n, d in dist_with.items()
         if n != v and G.nodes[n].get("kind") in ("resource", "role")
     }
+    reach_without = {
+        n: d for n, d in dist_without.items()
+        if n != v and H.nodes[n].get("kind") in ("resource", "role")
+    }
 
-    # Sum of sensitivities with path-length decay: gamma^(d - 1)
-    sens_sum = sum(
-        G.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1))
-        for n, d in reach.items()
-        if G.nodes[n].get("kind") == "resource"
-    )
+    sens_with    = sum(G.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_with.items())
+    sens_without = sum(H.nodes[n].get("sensitivity", 3) * (cfg.gamma ** (d - 1)) for n, d in reach_without.items())
+    delta_sens  = max(0.0, sens_with - sens_without)
+    delta_count = max(0.0, math.log1p(len(reach_with)) - math.log1p(len(reach_without)))
 
-    # Determine exposure dynamically on the current graph G
-    exposed = is_exposed(G, v)
-    exposure_factor = 1.0 if exposed else cfg.exposed_epsilon
-
-    # Formula from project specification
-    raw_score = exposure_factor * (
-        cfg.w_sensitivity * sens_sum + cfg.w_count * math.log1p(len(reach))
-    )
+    exp_score = exposure_score(G, v)
+    raw_score = exp_score * (cfg.w_sensitivity * delta_sens + cfg.w_count * delta_count)
 
     return ScoredFinding(
         finding=finding,
-        reachable=reach,
-        score=round(raw_score, 2),
-        exposed=exposed,
+        reachable=reach_with,
+        score=round(raw_score, 4),
+        exposed=exp_score > cfg.exposed_epsilon,
     )
 
 
