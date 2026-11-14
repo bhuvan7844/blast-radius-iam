@@ -450,6 +450,20 @@ blast-radius-iam/
 └── README.md                    # Project documentation
 ```
 
+## Contributors & Contributions
+
+**Hrushikesh & Bhuvan**
+- Project setup, data models, and Terraform/JSON parsing.
+- Asset sensitivity and exposure analysis improvements.
+- Counterfactual blast-radius scoring and evaluation suite.
+- Demo implementation and improvements.
+
+**Mohith & Pawan Tej**
+- Graph construction and privilege escalation detection.
+- Misconfiguration detection and reachability analysis.
+- Blast-radius scoring and priority ranking.
+- Greedy remediation, benchmarking, and CI integration.
+
 ---
 
 ## License
